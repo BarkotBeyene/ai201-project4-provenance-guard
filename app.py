@@ -47,6 +47,37 @@ def read_log(limit: int = 20) -> list:
     return [json.loads(line) for line in lines[-limit:]]
 
 
+def find_log_entry(content_id: str) -> dict | None:
+    """Return the most recent log entry matching content_id, or None."""
+    try:
+        with open(LOG_PATH) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return None
+    for line in reversed(lines):
+        entry = json.loads(line)
+        if entry.get("content_id") == content_id and entry.get("event") != "appeal":
+            return entry
+    return None
+
+
+def update_log_status(content_id: str, new_status: str) -> None:
+    """Rewrite the log file updating status on all entries matching content_id."""
+    try:
+        with open(LOG_PATH) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+    updated = []
+    for line in lines:
+        entry = json.loads(line)
+        if entry.get("content_id") == content_id and entry.get("event") != "appeal":
+            entry["status"] = new_status
+        updated.append(json.dumps(entry) + "\n")
+    with open(LOG_PATH, "w") as f:
+        f.writelines(updated)
+
+
 # ---------------------------------------------------------------------------
 # Signal 1: LLM classification via Groq
 # ---------------------------------------------------------------------------
@@ -240,6 +271,40 @@ def submit():
 def view_log():
     limit = request.args.get("limit", 20, type=int)
     return jsonify({"entries": read_log(limit)})
+
+
+@app.route("/appeal", methods=["POST"])
+def appeal():
+    data = request.get_json(force=True)
+    content_id = data.get("content_id", "").strip()
+    creator_reasoning = data.get("creator_reasoning", "").strip()
+
+    if not content_id:
+        return jsonify({"error": "content_id is required"}), 400
+    if not creator_reasoning:
+        return jsonify({"error": "creator_reasoning is required"}), 400
+
+    original = find_log_entry(content_id)
+    if original is None:
+        return jsonify({"error": "content_id not found"}), 404
+
+    update_log_status(content_id, "under_review")
+
+    log_event({
+        "content_id": content_id,
+        "event": "appeal",
+        "creator_reasoning": creator_reasoning,
+        "original_attribution": original.get("attribution"),
+        "original_confidence": original.get("confidence"),
+        "status": "under_review",
+    })
+
+    return jsonify({
+        "content_id": content_id,
+        "status": "under_review",
+        "message": "Your appeal has been received and is under review. "
+                   "A human reviewer will assess your content and the reasoning you provided.",
+    })
 
 
 if __name__ == "__main__":
