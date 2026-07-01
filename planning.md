@@ -19,8 +19,15 @@ POST /submit
   │     Measures: sentence length variance, type-token ratio, punctuation density
   │     Output: stylo_score (float 0–1, higher = more AI-like)
   │
-  ├─► [Confidence Scoring]
-  │     combined = (0.60 × llm_score) + (0.40 × stylo_score)
+  ├─► [Signal 3: N-gram Repetition (STRETCH — Ensemble)]
+  │     Pure Python — no external libraries
+  │     Measures: ratio of repeated bigrams + trigrams to total n-grams
+  │     AI text reuses phrase patterns more than human text
+  │     Output: ngram_score (float 0–1, higher = more AI-like)
+  │
+  ├─► [Confidence Scoring — Weighted Ensemble]
+  │     combined = (0.50 × llm_score) + (0.30 × stylo_score) + (0.20 × ngram_score)
+  │     Conflict resolution: if llm and stylo disagree by > 0.4, weight shifts to llm
   │     Output: confidence (float 0–1)
   │
   ├─► [Transparency Label]
@@ -28,14 +35,17 @@ POST /submit
   │     confidence 0.35–0.65 → "Uncertain" label
   │     confidence > 0.65  → "Likely AI-Generated" label
   │
+  ├─► [Provenance Certificate Check (STRETCH)]
+  │     If creator has verified status → append certificate badge to response
+  │
   ├─► [Audit Log]
   │     Append structured JSON entry to audit_log.jsonl
   │     Fields: content_id, creator_id, timestamp, attribution,
-  │             confidence, llm_score, stylo_score, status
+  │             confidence, llm_score, stylo_score, ngram_score, status
   │
   └─► JSON Response
         content_id, attribution, confidence, llm_score,
-        stylo_score, label_text, status
+        stylo_score, ngram_score, label_text, status, certificate (if applicable)
 ```
 
 ### Appeal Flow
@@ -231,3 +241,61 @@ Sentence length variance and TTR are statistically unreliable at very short text
 - Label variants: submit one input from each confidence range and confirm the returned `label_text` matches the exact strings in this spec.
 - Appeal: submit a content ID from a prior `/submit` call, then `GET /log` and confirm the appeal entry is present with `status: "under_review"` and `creator_reasoning` populated.
 - Rate limiting: run the 12-request loop and confirm the first 10 return `200` and the remaining return `429`.
+
+---
+
+## Stretch Features
+
+### S1 — Ensemble Detection (3 signals)
+
+**Signal 3: N-gram Repetition Rate**
+
+What it measures: the ratio of repeated 2-gram and 3-gram phrases to total n-grams. AI text reuses phrase patterns at higher rates than human text because it generates tokens based on learned distributions that favor common co-occurrences. Human writing is more inventive at the phrase level.
+
+Output: `ngram_score` float 0–1. Higher = more AI-like (more repetitive phrase patterns).
+
+Weighting strategy (3-signal ensemble):
+```
+confidence = (0.50 × llm_score) + (0.30 × stylo_score) + (0.20 × ngram_score)
+```
+
+Conflict resolution: if `llm_score` and `stylo_score` differ by more than 0.4, the ensemble shifts weight further toward the LLM (semantic judgment is more reliable than structural heuristics when signals strongly conflict). The n-gram signal serves as a tiebreaker in moderate-disagreement cases.
+
+Why this weighting: LLM (50%) carries the most weight because it understands meaning. Stylometric (30%) provides structural independence. N-gram (20%) adds phrase-level evidence without over-indexing on a signal that fails on short texts.
+
+---
+
+### S2 — Provenance Certificate
+
+**Design:** A creator can earn a "Verified Human Author" certificate by completing a verification challenge on their content. The challenge: the creator must answer a knowledge question about specific details in their submitted text that only the actual author would know (e.g., "What specific emotion did you intend in the third sentence?" or "Describe something about the context in which you wrote this that isn't in the text"). The system stores the certificate against the `creator_id`.
+
+**Endpoints:**
+- `POST /verify` — accepts `content_id` and `verification_answer`; stores verified status; returns certificate
+- `GET /certificate/<content_id>` — returns certificate status and badge text
+
+**What "verified" means on subsequent submits:** if a creator holds a certificate, future `/submit` responses include a `certificate` field with the badge text, distinguishable from the standard transparency label.
+
+**Storage:** certificates stored in `certificates.json` keyed by `creator_id`.
+
+---
+
+### S3 — Analytics Dashboard
+
+**Endpoint:** `GET /analytics`
+
+**Metrics:**
+1. **Detection pattern** — count and percentage breakdown of `likely_human`, `uncertain`, `likely_ai` across all classified entries
+2. **Appeal rate** — number of appeals / number of classified submissions
+3. **Average confidence by attribution** — mean confidence score within each of the three categories (shows whether the system is calibrated: `likely_ai` entries should average higher than `uncertain`, which should average higher than `likely_human`)
+
+---
+
+### S4 — Multi-Modal Support
+
+**Second content type:** image descriptions (alt-text or caption strings submitted alongside or instead of prose text). The pipeline differences:
+
+- Signal 1 (LLM): prompt is reworded to assess whether an image description reads as AI-generated (AI descriptions tend to be formulaic: "A [adjective] [noun] [verb phrase] against a [adjective] background")
+- Signal 2 (Stylometric): TTR and punctuation diversity still apply; sentence length variance is less meaningful for single-sentence captions, so it is down-weighted
+- Signal 3 (N-gram): applies as-is
+
+**Endpoint extension:** `POST /submit` accepts an optional `content_type` field (`"text"` default, `"image_description"` for captions/alt-text). Routes to the appropriate signal configuration.
